@@ -12,6 +12,7 @@
 #include <chrono>
 #include <mutex>
 #include <ranges>
+#include <torch/torch.h>
 #include "util.h"
 #include "tictactoe.h"
 #include "thc.h"
@@ -30,7 +31,6 @@ class Apprentice {
     Apprentice(std::function<double(S)> eval, std::function<void(S, double)> train): eval(eval), train(train) {  };
 };
 
-// S must have is_terminal()
 template <typename S, typename A>
 class MDP {
   public:
@@ -42,11 +42,6 @@ class MDP {
     MDP(std::function<S(S s, A a)> tr, std::function<std::optional<double>(S s)> reward, std::function<std::vector<A>(S s)> actions, std::function<bool(S s)> is_terminal)
     : tr(tr), reward(reward), actions(actions), is_terminal(is_terminal) {  };
 };
-
-/* template<typename T>
-concept has_is_terminal = requires(T t) {
-    { t.is_terminal() } -> std::convertible_to<bool>;
-}; */
 
 template <typename S, typename A>
 class MCTSNode {
@@ -349,7 +344,7 @@ public:
   };
 };
 
-int play_chess() {
+int uci_chess() {
   // make a transition function pointer that takes a position and a move and returns a new position
   // this is a lambda function that takes a position and a move and returns a new position
   thc::ChessRules (*tr)(thc::ChessRules s, std::string a) = [](thc::ChessRules cr, std::string mv) {
@@ -391,7 +386,22 @@ int play_chess() {
   int stalemates = 0;
   int wins = 0;
   int losses = 0;
-  auto apprentice = new Apprentice<thc::ChessRules>([](thc::ChessRules state) { return 0.0; }, [](thc::ChessRules state, double reward){});
+  torch::nn::Sequential model = torch::nn::Sequential(
+        {{"lin",torch::nn::Linear(8*8*13, 1)}, // take in an (8,8,13) board state
+         {"relu",torch::nn::ReLU(1)}}
+  );
+  model->to(torch::kCPU);
+  auto evalf = [&model](thc::ChessRules state) { return model->forward(board_to_tensor(state).view({-1,8*8*13}).to(torch::kCPU)).item<double>(); };
+  auto trainf = [&model](thc::ChessRules state, double reward) {
+    auto loss = torch::nn::MSELoss();
+    auto output = model->forward(board_to_tensor(state).view({-1,8*8*13}).to(torch::kCPU)).view({1});
+    auto target = torch::tensor({reward}).to(torch::kCPU);
+    auto l = loss(output, target);
+    l.backward();
+    torch::optim::SGD(model->parameters(), 0.01).step();
+    torch::optim::SGD(model->parameters(), 0.01).zero_grad();
+  };
+  auto apprentice = new Apprentice<thc::ChessRules>(evalf, trainf);
   auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
   
   auto cur_node = root.get();
@@ -416,6 +426,9 @@ int play_chess() {
       }
     }
     toks.push_back(cur);
+    if (toks.size() == 0) {
+      continue;
+    }
     if (toks[0] == "uci") {
       std::cout << "id name " << "jaybot9000" << std::endl;
       std::cout << "id author " << "jay" << std::endl;
@@ -457,107 +470,95 @@ int play_chess() {
     }
     // if cmd matches the regular expression go (.*)
     if (toks[0] == "go") {
-      best_move_str = cur_node->par_search(150000, 0.5, *apprentice);
+      best_move_str = cur_node->par_search(800, 0.5, *apprentice);
       std::cout << "bestmove " << best_move_str << std::endl;
     }
 
     if (toks[0] == "stop") {
       std::cout << "bestmove " << best_move_str << std::endl;
-      // do nothing lmfao
     }
     if (toks[0] == "quit") {
+      // FIXME FIXME: dump apprentice model to disk
       delete apprentice;
       return 0;
     }
-  }
-}
-
-int play_ttt() {
-  TicTacToeBoard (*tr)(TicTacToeBoard s, int a) = [](TicTacToeBoard b, int mv) {
-    return b.move(mv);
-  };
-
-  std::vector<int> (*actions)(TicTacToeBoard b) = [](TicTacToeBoard b) {
-    return b.getMoves();
-  };
-
-  auto reward = [](TicTacToeBoard b) -> std::optional<double> {
-    std::optional<int> winner = b.winner();
-    if (!winner.has_value()) {
-      assert (!std::optional<double>().has_value());
-      return std::nullopt;
-    }
-
-    switch (winner.value()) {
-      case 'O':
-        return std::optional(1.0);
-      case 'X':
-        return std::optional(-1.0);
-      case 'T':
-        return std::optional(0.0);
-      default:
-        return std::nullopt;
-    }
-  };
-
-  auto is_terminal = [](TicTacToeBoard b) {
-    return b.over();
-  };
-
-  auto mdp = MDP<TicTacToeBoard, int>(tr, reward, actions, is_terminal);
-  auto apprentice = new Apprentice<TicTacToeBoard>([](auto b) { return 0.0; }, [](auto b, double reward){});
-  int wins = 0;
-  int draws = 0;
-  int losses = 0;
-  for (int games = 0; games < 100; games++){
-    TicTacToeBoard board = TicTacToeBoard();
-    while (!board.over()) {
-      int move = -1;
-      while (move == -1) {
-        // get player action and play it
-        /* std::cout << "your move: ";
-        std::string move_str;
-        std::cin >> move_str; */
-        move = select_randomly(g,board.getMoves());
-        /* move = std::stoi(move_str); */
-        if (move < 0 || move > 8) {
-          move = -1;
-          std::cout << "invalid move" << std::endl;
-          board.print();
-          continue;
+    if (toks[0] == "selfplay") {
+      // perform toks[1] steps of self-play and use that to train the model
+      int steps = std::stoi(toks[1]);
+      bool over = false;
+      auto played = std::vector<std::string>();
+      auto num_turns = 0;
+      for (int i = 0; i < steps; i++) {
+        if (i == 0 || over) {
+          thc::ChessRules board = thc::ChessRules();
+          root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, board, std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+          cur_node = root.get();
+          played.clear();
+          display_position(board, "Initial position");
+          over = false;
         }
-        board = board.move(move);
-        board.print();
+        std::cout << "Step " << num_turns << std::endl;
+        std::cout << "\tWins: " << wins << std::endl;
+        std::cout << "\tLosses: " << losses << std::endl;
+        std::cout << "\tStalemates/draws: " << stalemates << std::endl;
+        if (num_turns > 0 && num_turns % 5 == 0) {
+          std::cout << "\tClearing\n";
+          root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+        }
+
+        // have white play a move
+        cur_node = root.get()->play(played);
+        cur_node->state = board;
+        auto best_move_str = cur_node->par_search(800, 0.5, *apprentice);
+        thc::Move best_move;
+        best_move.TerseIn(&board, best_move_str.c_str());
+        board.PushMove(best_move);
+        played.push_back(move_to_str(board, best_move));
+        num_turns += 1;
+
+        std::cout << "White played: " << player_move.TerseOut() << std::endl;
+        display_position(board, "");
+
+        thc::TERMINAL eval;
+        board.Evaluate(eval);
+        if (eval == thc::TERMINAL_BCHECKMATE) { // AI player (black) is checkmated
+          std::cout << "White won!" << std::endl;
+          losses += 1;
+          over = true;
+          break;
+        } else if (eval == thc::TERMINAL_WSTALEMATE || eval == thc::TERMINAL_BSTALEMATE || mdp.is_terminal(board)) {
+          std::cout << "Draw!" << std::endl;
+          stalemates += 1;
+          break;
+        }
+
+        cur_node = root.get()->play(played);
+        cur_node->state = board;
+        auto best_move_str = cur_node->par_search(800, 0.5, *apprentice);
+        thc::Move best_move;
+        best_move.TerseIn(&board, best_move_str.c_str());
+        num_turns += 1;
+
+        board.PushMove(best_move);
+        played.push_back(move_to_str(board, best_move));
+        std::cout << "Black played: " << best_move.TerseOut() << std::endl;
+        display_position(board, "");
+
+        board.Evaluate(eval);
+        if (eval == thc::TERMINAL_WCHECKMATE) { // Human player (white) is checkmated
+          std::cout << "Black won!" << std::endl;
+          wins += 1;
+          break;
+        } else if (eval == thc::TERMINAL_WSTALEMATE || eval == thc::TERMINAL_BSTALEMATE || mdp.is_terminal(board)) {
+          std::cout << "Draw!" << std::endl;
+          stalemates += 1;
+          break;
+        }
       }
-
-      if (board.over()) {
-        break;
-      }
-
-      auto root = MCTSNode<TicTacToeBoard, int>(mdp, board, std::vector<MCTSNode<TicTacToeBoard, int>*>(), std::nullopt);
-      auto best = root.par_search(1000000, 1.4, *apprentice);
-      std::cout << "best action: " << best << std::endl;
-      board = board.move(best);
-      board.print();
-    }
-
-    // print winner
-    std::optional<int> winner = board.winner();
-    wins = winner.has_value() && winner.value() == 'O' ? wins + 1 : wins;
-    losses = winner.has_value() && winner.value() == 'X' ? losses + 1 : losses;
-    draws = winner.has_value() && winner.value() == 'T' ? draws + 1 : draws;
-    if (!winner.has_value()) {
-      throw std::runtime_error("[ERROR]: no winner for terminal board");
-    } else {
-      std::cout << "winner: ";
-      printf("%c\n", winner.value());
     }
   }
-  std::cout << "wins: " << wins << std::endl;
-  std::cout << "losses: " << losses << std::endl;
-  std::cout << "draws: " << draws << std::endl;
 }
 
 int main() {
-  return play_chess();
+  return uci_chess();
 }
