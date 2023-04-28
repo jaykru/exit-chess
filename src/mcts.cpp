@@ -317,7 +317,7 @@ public:
       thread.join();
     }
 
-    std::cout << "Averaged " << std::accumulate(durations.begin(), durations.end(), 0) / durations.size() << " microseconds per iteration for this search." << std::endl;
+    // std::cout << "Averaged " << std::accumulate(durations.begin(), durations.end(), 0) / durations.size() << " microseconds per iteration for this search." << std::endl;
 
     MCTSNode<S,A> *tree = trees[0];
     for (auto i = 1; i < trees.size(); i++) {
@@ -413,84 +413,72 @@ int play_chess() {
   auto apprentice = new Apprentice<thc::ChessRules>([](thc::ChessRules state) { return 0.0; }, [](thc::ChessRules state, double reward){});
   auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
   
-  for (int i = 0; i < 100; i++) {
-    auto cur_node = root.get();
-    auto played = std::vector<std::string>();
-      // create a new board (initial position
-    thc::ChessRules board = thc::ChessRules(); 
-    display_position(board, "Initial position");
-    auto num_turns = 0;
-    for(;;) {
-      std::cout << "Turn " << num_turns << std::endl;
-      std::cout << "\tWins: " << wins << std::endl;
-      std::cout << "\tLosses: " << losses << std::endl;
-      std::cout << "\tStalemates/draws: " << stalemates << std::endl;  
-      if (num_turns > 0 && num_turns % 5 == 0) {
-        std::cout << "\tClearing\n";
-        root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+  auto cur_node = root.get();
+  auto played = std::vector<std::string>();
+    // create a new board (initial position
+  thc::ChessRules board = thc::ChessRules(); 
+  auto num_turns = 0;
+
+  // read `uci` command in from stdin and respond
+  for (;;) {
+    std::string cmd;
+    std::getline(std::cin, cmd);
+    auto toks = std::vector<std::string>();
+    std::string cur = "";
+    for (auto c : cmd) {
+      if (c == ' ') {
+        toks.push_back(cur);
+        cur = "";
+      } else {
+        cur.push_back(c);
       }
-
-      // have the player play a move
-      auto legal_moves = get_legal_moves(board);
-      auto legal_move_strs = std::vector<std::string>();
-      for (auto mv : legal_moves) {
-        legal_move_strs.push_back(move_to_str(board, mv));
+    }
+    toks.push_back(cur);
+    if (toks[0] == "uci") {
+      std::cout << "id name " << "jaybot9000" << std::endl;
+      std::cout << "id author " << "jay" << std::endl;
+      std::cout << "uciok" << std::endl;
+    }
+    if (toks[0] == "isready") {
+      std::cout << "readyok" << std::endl;
+    }
+    if (toks[0] == "ucinewgame") {
+      // create a new board (initial position)
+      board = thc::ChessRules(); 
+      num_turns = 0;
+      played = std::vector<std::string>();
+      root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+      cur_node = root.get();
+    }
+    // if cmd matches the regular expression position (pos) (.*)
+    if (toks[0] == "position") {
+      std::string fen = toks[1];
+      std::vector<std::string> moves = std::vector<std::string>(toks.begin() + 2, toks.end());
+      if (fen == "startpos") {
+        board = thc::ChessRules();
+      } else {
+        throw std::runtime_error("custom fen not supported"); // FIXME: add support for custom FEN
       }
-      std::cout << "Legal moves: " << legal_move_strs << std::endl;
-      std::string player_move_str;
-      std::cout << "Enter a move: ";
-      std::cin >> player_move_str;
-      auto player_move = str_to_move(board, player_move_str);
-      board.PushMove(player_move);
-      played.push_back(move_to_str(board, player_move));
-      num_turns += 1;
-
-      std::cout << "Player played: " << player_move.TerseOut() << std::endl;
-      display_position(board, "");
-
-      thc::TERMINAL eval;
-      board.Evaluate(eval);
-      if (eval == thc::TERMINAL_BCHECKMATE) { // AI player (black) is checkmated
-        std::cout << "Player won!" << std::endl;
-        losses += 1;
-        break;
-      } else if (eval == thc::TERMINAL_WSTALEMATE || eval == thc::TERMINAL_BSTALEMATE || mdp.is_terminal(board)) {
-        std::cout << "Draw!" << std::endl;
-        stalemates += 1;
-        break;
+      root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, board, std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+      std::vector<std::string> played = std::vector<std::string>();
+      for (auto mv : moves) {
+        board.PlayMove(str_to_move(board, mv));
+        played.push_back(mv);
       }
-
       cur_node = root.get()->play(played);
-      cur_node->state = board;
-      assert (cur_node->state == board);
-      if (mdp.is_terminal(cur_node->state)) {
-        throw std::runtime_error("cur_node should be non-terminal");
-      };
-      assert (!mdp.actions(cur_node->state).empty());
-      auto best_move_str = cur_node->par_search(800, 0.5, *apprentice);
-      thc::Move best_move;
-      best_move.TerseIn(&board, best_move_str.c_str());
-      num_turns += 1;
-      
-      board.PushMove(best_move);
-      played.push_back(move_to_str(board, best_move));
-      std::cout << "Computer played: " << best_move.TerseOut() << std::endl;
-      display_position(board, "");
-      
-      board.Evaluate(eval);
-      if (eval == thc::TERMINAL_WCHECKMATE) { // Human player (white) is checkmated
-        std::cout << "Computer won!" << std::endl;
-        wins += 1;
-        break;
-      } else if (eval == thc::TERMINAL_WSTALEMATE || eval == thc::TERMINAL_BSTALEMATE || mdp.is_terminal(board)) {
-        std::cout << "Draw!" << std::endl;
-        stalemates += 1;
-        break;
-      }
+    }
+    // if cmd matches the regular expression go (.*)
+    if (toks[0] == "go") {
+      // do nothing lmfao
+    }
+
+    if (toks[0] == "stop") {
+      auto best_move_str = cur_node->par_search(50000, 0.5, *apprentice);
+      std::cout << "bestmove " << best_move_str << std::endl;
+      // do nothing lmfao
     }
   }
   delete apprentice;
- 
   return 0;
 }
 
