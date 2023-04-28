@@ -1,7 +1,6 @@
 #include "thc.h"
 #include <iostream>
 #include <vector>
-#include <torch/torch.h>
 
 bool board_is_draw(thc::ChessRules board) {
   thc::DRAWTYPE draw_type;
@@ -19,63 +18,6 @@ bool board_is_terminal(thc::ChessRules board) {
         return true;
     }
     return false;
-}
-
-torch::Tensor board_to_tensor(thc::ChessRules board) {
-  // returns a 8x8x13 tensor representing the board
-  // the 13 channels are:
-  // 0: white pawn
-  // 1: white knight
-  // 2: white bishop
-  // 3: white rook
-  // 4: white queen
-  // 5: white king
-  // 6: black pawn
-  // 7: black knight
-  // 8: black bishop
-  // 9: black rook
-  // 10: black queen
-  // 11: black king
-  // 12: blank
-  torch::Tensor tensor = torch::zeros({8, 8, 13});
-  for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 8; col++) {
-      char piece = board.squares[row*8 + col];
-      if (piece == '.') {
-        continue;
-      }
-      int channel = 0;
-      if (piece == 'P') {
-        channel = 0;
-      } else if (piece == 'N') {
-        channel = 1;
-      } else if (piece == 'B') {
-        channel = 2;
-      } else if (piece == 'R') {
-        channel = 3;
-      } else if (piece == 'Q') {
-        channel = 4;
-      } else if (piece == 'K') {
-        channel = 5;
-      } else if (piece == 'p') {
-        channel = 6;
-      } else if (piece == 'n') {
-        channel = 7;
-      } else if (piece == 'b') {
-        channel = 8;
-      } else if (piece == 'r') {
-        channel = 9;
-      } else if (piece == 'q') {
-        channel = 10;
-      } else if (piece == 'k') {
-        channel = 11;
-      } else {
-        channel = 12;
-      }
-      tensor[row][col][channel] = 1;
-    }
-  }
-  return tensor;
 }
 
 std::vector<thc::Move> get_legal_moves(thc::ChessRules cr) {

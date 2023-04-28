@@ -12,7 +12,6 @@
 #include <chrono>
 #include <mutex>
 #include <ranges>
-#include <torch/torch.h>
 #include "util.h"
 #include "tictactoe.h"
 #include "thc.h"
@@ -177,9 +176,6 @@ public:
   inline double score(int cur_itersm1, double exploration_bias, Apprentice<S> apprentice) {
       auto bonus_weight = 0.5;
       auto exploration_term = exploration_bias * sqrt((double)log((double)this->parent.value()->count + (double)1.0) / ((double)this->count + (double)1.0));
-      // if (this->count == 0 && this->parent.value()->count == 0) {
-      //   assert(exploration_term == exploration_bias*1.0);
-      // }
       auto exp = this->expected.value_or(0.0);
       return exp + bonus_weight * apprentice.eval(this->state) + exploration_bias * exploration_term;
   }
@@ -275,8 +271,8 @@ public:
       if (child == this->children.end()) {
         std::cout << "[ERROR]: no child found for action: " << action << std::endl;
         std::cout << "state is_terminal: " << mdp.is_terminal(this->state) << std::endl;
-        std::cout << "children " << "(" << this->children.size() << "): " << this->children << std::endl;
-        std::cout << "actions " << "(" << actions.size() << "): " << actions << std::endl;
+        // std::cout << "children " << "(" << this->children.size() << "): " << this->children << std::endl;
+        // std::cout << "actions " << "(" << actions.size() << "): " << actions << std::endl;
         throw std::runtime_error("[ERROR]: no child found for action");
       }
       return (*child)->expected.value_or(-std::numeric_limits<double>::infinity()); // we never pick an unexplored child
@@ -340,7 +336,7 @@ public:
       if (child == this->children.end()) {
         std::cout << "[ERROR]: no child found for action" << std::endl;
         std::cout << "state is_terminal: " << mdp.is_terminal(this->state) << std::endl;
-        std::cout << "children " << "(" << this->children.size() << "): " << this->children << std::endl;
+        // std::cout << "children " << "(" << this->children.size() << "): " << this->children << std::endl;
         throw std::runtime_error("[ERROR]: no child found for action");
       }
       return (*child)->expected.value_or(-std::numeric_limits<double>::infinity()); // we never pick an unexplored child
@@ -395,21 +391,6 @@ int play_chess() {
   int stalemates = 0;
   int wins = 0;
   int losses = 0;
-  torch::nn::Sequential model = torch::nn::Sequential(
-        {{"lin",torch::nn::Linear(8*8*13, 1)}, // take in an (8,8,13) board state
-         {"relu",torch::nn::ReLU(1)}}
-  );
-  model->to(torch::kCPU);
-  auto evalf = [&model](thc::ChessRules state) { return model->forward(board_to_tensor(state).view({-1,8*8*13}).to(torch::kCPU)).item<double>(); };
-  auto train = [&model](thc::ChessRules state, double reward) {
-    auto loss = torch::nn::MSELoss();
-    auto output = model->forward(board_to_tensor(state).view({-1,8*8*13}).to(torch::kCPU)).view({1});
-    auto target = torch::tensor({reward}).to(torch::kCPU);
-    auto l = loss(output, target);
-    l.backward();
-    torch::optim::SGD(model->parameters(), 0.01).step();
-    torch::optim::SGD(model->parameters(), 0.01).zero_grad();
-  };
   auto apprentice = new Apprentice<thc::ChessRules>([](thc::ChessRules state) { return 0.0; }, [](thc::ChessRules state, double reward){});
   auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
   
@@ -418,6 +399,7 @@ int play_chess() {
     // create a new board (initial position
   thc::ChessRules board = thc::ChessRules(); 
   auto num_turns = 0;
+  std::string best_move_str;
 
   // read `uci` command in from stdin and respond
   for (;;) {
@@ -453,7 +435,13 @@ int play_chess() {
     // if cmd matches the regular expression position (pos) (.*)
     if (toks[0] == "position") {
       std::string fen = toks[1];
-      std::vector<std::string> moves = std::vector<std::string>(toks.begin() + 2, toks.end());
+      std::vector<std::string> moves;
+      if (toks.size() >= 3 && toks[2] == "moves") {
+        moves = std::vector<std::string>(toks.begin() + 3, toks.end());
+      } else {
+        moves = std::vector<std::string>();
+      }
+
       if (fen == "startpos") {
         board = thc::ChessRules();
       } else {
@@ -469,17 +457,19 @@ int play_chess() {
     }
     // if cmd matches the regular expression go (.*)
     if (toks[0] == "go") {
-      // do nothing lmfao
+      best_move_str = cur_node->par_search(150000, 0.5, *apprentice);
+      std::cout << "bestmove " << best_move_str << std::endl;
     }
 
     if (toks[0] == "stop") {
-      auto best_move_str = cur_node->par_search(50000, 0.5, *apprentice);
       std::cout << "bestmove " << best_move_str << std::endl;
       // do nothing lmfao
     }
+    if (toks[0] == "quit") {
+      delete apprentice;
+      return 0;
+    }
   }
-  delete apprentice;
-  return 0;
 }
 
 int play_ttt() {
