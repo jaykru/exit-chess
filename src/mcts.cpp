@@ -331,7 +331,6 @@ public:
       if (child == this->children.end()) {
         std::cout << "[ERROR]: no child found for action" << std::endl;
         std::cout << "state is_terminal: " << mdp.is_terminal(this->state) << std::endl;
-        // std::cout << "children " << "(" << this->children.size() << "): " << this->children << std::endl;
         throw std::runtime_error("[ERROR]: no child found for action");
       }
       return (*child)->expected.value_or(-std::numeric_limits<double>::infinity()); // we never pick an unexplored child
@@ -386,10 +385,15 @@ int uci_chess() {
   int stalemates = 0;
   int wins = 0;
   int losses = 0;
+  // if apprentice.pt exists, load it into `model` using torch::load
   torch::nn::Sequential model = torch::nn::Sequential(
-        {{"lin",torch::nn::Linear(8*8*13, 1)}, // take in an (8,8,13) board state
-         {"relu",torch::nn::ReLU(1)}}
-  );
+                                                      {{"lin",torch::nn::Linear(8*8*13, 1)}, // take in an (8,8,13) board state
+                                                       {"relu",torch::nn::ReLU(1)}}
+                                                      );
+  if (std::filesystem::exists("apprentice.pt")) {
+    torch::load(model, "apprentice.pt");
+  }
+
   model->to(torch::kCPU);
   auto evalf = [&model](thc::ChessRules state) { return model->forward(board_to_tensor(state).view({-1,8*8*13}).to(torch::kCPU)).item<double>(); };
   auto trainf = [&model](thc::ChessRules state, double reward) {
@@ -401,7 +405,7 @@ int uci_chess() {
     torch::optim::SGD(model->parameters(), 0.01).step();
     torch::optim::SGD(model->parameters(), 0.01).zero_grad();
   };
-  auto apprentice = new Apprentice<thc::ChessRules>(evalf, trainf);
+  auto apprentice = new Apprentice<thc::ChessRules>([](auto s) {return 0.0;}, [](auto s, auto r){});
   auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
   
   auto cur_node = root.get();
@@ -470,7 +474,11 @@ int uci_chess() {
     }
     // if cmd matches the regular expression go (.*)
     if (toks[0] == "go") {
-      best_move_str = cur_node->par_search(800, 0.5, *apprentice);
+      if (mdp.is_terminal(cur_node->state) && !mdp.actions(cur_node->state).empty()) {
+        best_move_str = select_randomly(g, mdp.actions(cur_node->state)); // FIXME: this is a big bug,
+      } else {
+        best_move_str = cur_node->par_search(150000, 0.5, *apprentice);
+      }
       std::cout << "bestmove " << best_move_str << std::endl;
     }
 
@@ -478,22 +486,29 @@ int uci_chess() {
       std::cout << "bestmove " << best_move_str << std::endl;
     }
     if (toks[0] == "quit") {
-      // FIXME FIXME: dump apprentice model to disk
+      // dump apprentice model to disk
+      // if apprentice.pt already exists, delete it
+      if (std::filesystem::exists("apprentice.pt")) {
+        std::filesystem::remove("apprentice.pt");
+      }
+      torch::save(model, "apprentice.pt");
       delete apprentice;
       return 0;
     }
     if (toks[0] == "selfplay") {
       // perform toks[1] steps of self-play and use that to train the model
       int steps = std::stoi(toks[1]);
+      std::cout << "Doing selfplay for " << steps << " steps" << std::endl;
       bool over = false;
       auto played = std::vector<std::string>();
       auto num_turns = 0;
-      for (int i = 0; i < steps; i++) {
-        if (i == 0 || over) {
-          thc::ChessRules board = thc::ChessRules();
+      for (int num_turns = 0; num_turns < steps; num_turns += 1) {
+        if (num_turns == 0 || over) {
+          std::cout << "Starting new game" << std::endl;
+          board = thc::ChessRules();
           root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, board, std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
           cur_node = root.get();
-          played.clear();
+          played = std::vector<std::string>();
           display_position(board, "Initial position");
           over = false;
         }
@@ -506,17 +521,16 @@ int uci_chess() {
           root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
         }
 
-        // have white play a move
+        // play a move
         cur_node = root.get()->play(played);
         cur_node->state = board;
-        auto best_move_str = cur_node->par_search(800, 0.5, *apprentice);
+        auto best_move_str = cur_node->par_search(100000, 0.5, *apprentice);
         thc::Move best_move;
         best_move.TerseIn(&board, best_move_str.c_str());
         board.PushMove(best_move);
         played.push_back(move_to_str(board, best_move));
-        num_turns += 1;
 
-        std::cout << "White played: " << player_move.TerseOut() << std::endl;
+        std::cout << ((num_turns % 2 == 0) ? "White" : "Black") << " played: " << best_move.TerseOut() << std::endl;
         display_position(board, "");
 
         thc::TERMINAL eval;
@@ -525,36 +539,17 @@ int uci_chess() {
           std::cout << "White won!" << std::endl;
           losses += 1;
           over = true;
-          break;
-        } else if (eval == thc::TERMINAL_WSTALEMATE || eval == thc::TERMINAL_BSTALEMATE || mdp.is_terminal(board)) {
-          std::cout << "Draw!" << std::endl;
-          stalemates += 1;
-          break;
-        }
-
-        cur_node = root.get()->play(played);
-        cur_node->state = board;
-        auto best_move_str = cur_node->par_search(800, 0.5, *apprentice);
-        thc::Move best_move;
-        best_move.TerseIn(&board, best_move_str.c_str());
-        num_turns += 1;
-
-        board.PushMove(best_move);
-        played.push_back(move_to_str(board, best_move));
-        std::cout << "Black played: " << best_move.TerseOut() << std::endl;
-        display_position(board, "");
-
-        board.Evaluate(eval);
-        if (eval == thc::TERMINAL_WCHECKMATE) { // Human player (white) is checkmated
+        } else if (eval == thc::TERMINAL_WCHECKMATE) { // Human player (white) is checkmated
           std::cout << "Black won!" << std::endl;
           wins += 1;
-          break;
-        } else if (eval == thc::TERMINAL_WSTALEMATE || eval == thc::TERMINAL_BSTALEMATE || mdp.is_terminal(board)) {
+          over = true;
+        } else if (eval == thc::TERMINAL_WSTALEMATE || eval == thc::TERMINAL_BSTALEMATE || mdp.is_terminal(board) || (num_turns != 0 && num_turns % 50 == 0)) {
           std::cout << "Draw!" << std::endl;
           stalemates += 1;
-          break;
+          over = true;
         }
       }
+      std::cout << "Done with selfplay" << std::endl;
     }
   }
 }
