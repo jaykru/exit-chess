@@ -1,6 +1,6 @@
 # Root-Parallel Expert Iteration in C++
 
-This is a fast, [root-parallel](https://dke.maastrichtuniversity.nl/m.winands/documents/multithreadedMCTS2.pdf) C++ implementation of the Expert Iteration algorithm proposed by Anthony et al. The implementation is generic in a choice of a Markov decision process as well as your choice of an "apprentice".
+This is a fast, [root-parallel](https://dke.maastrichtuniversity.nl/m.winands/documents/multithreadedMCTS2.pdf) C++ implementation of the Expert Iteration algorithm proposed by Anthony et al. The implementation is generic in a choice of a Markov decision process as well as your choice of an *apprentice*.
 
 The current version of the program presents a UCI interface to be used with Lichess as a chess bot. The apprentice used in the chess bot is a trivial one, which evaluates every state to 0 and performs no training. With the trivial apprentice, the Expert Iteration algorithm degenerates to plain Monte-Carlo Tree Search. Even with pure MCTS, the program has managed to beat a human player :) A better apprentice model is in progress.
 
