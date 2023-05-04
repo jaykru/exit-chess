@@ -1,4 +1,5 @@
 #include <iostream>
+#include <filesystem>
 #include <cmath>
 #include <vector>
 #include <optional>
@@ -405,7 +406,7 @@ int uci_chess() {
     torch::optim::SGD(model->parameters(), 0.01).step();
     torch::optim::SGD(model->parameters(), 0.01).zero_grad();
   };
-  auto apprentice = new Apprentice<thc::ChessRules>([](auto s) {return 0.0;}, [](auto s, auto r){});
+  auto apprentice = new Apprentice<thc::ChessRules>(evalf, trainf);
   auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
   
   auto cur_node = root.get();
@@ -524,7 +525,7 @@ int uci_chess() {
         // play a move
         cur_node = root.get()->play(played);
         cur_node->state = board;
-        auto best_move_str = cur_node->par_search(100000, 0.5, *apprentice);
+        auto best_move_str = cur_node->par_search(800, 0.5, *apprentice);
         thc::Move best_move;
         best_move.TerseIn(&board, best_move_str.c_str());
         board.PushMove(best_move);

@@ -1,0 +1,3 @@
+[submodule "include/pytorch"]
+	path = include/pytorch
+	url = https://github.com/pytorch/pytorch

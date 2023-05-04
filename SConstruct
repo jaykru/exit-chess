@@ -2,7 +2,7 @@
 import os
 env = DefaultEnvironment()
 
-libtorch_path = "./include/pytorch/torch"
+libtorch_path = "/usr/include/torch"
 
 env.Append(LINKFLAGS=[# "-static",
                       '-Wl,-L'+ libtorch_path +'/lib'])
@@ -12,8 +12,8 @@ env.Append(LIBPATH=[libtorch_path + '/lib'])
 
 # Add the vendored dependencies to the include and library paths
 
-env.Append(CPPPATH=[libtorch_path + "/include"
-                   , libtorch_path + "/include/torch/csrc/api/include"
+env.Append(CPPPATH=[libtorch_path
+                   , libtorch_path + "/csrc/api/include"
                    , "include"])
 # env.Append(LIBPATH=["vendor/projA/lib", "vendor/projB/lib"])
 
