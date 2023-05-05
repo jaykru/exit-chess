@@ -20,6 +20,6 @@ The main executable presents a [UCI](https://wbec-ridderkerk.nl/html/UCIProtocol
 ## License
 
 Copyright Jay Kruer 2023. You probably won't want to use the code (yet) but
-contact me. I haven't decided on a license yet.
+contact me if you do. I haven't decided on a license yet.
 
 [^1]: I'd like to make this less manual and kludgy in the future, but this is a hobby project for now...
