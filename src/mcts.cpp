@@ -279,8 +279,6 @@ public:
     }
 
     auto child = *std::find_if(this->children.begin(), this->children.end(), [&,this](auto child){ return child->state == this->mdp.tr(this->state, *ret); });    
-
-    // apprentice.train(child->state, child->expected.value());
     return *ret;
   };
 
@@ -309,8 +307,6 @@ public:
       thread.join();
     }
 
-    // std::cout << "Averaged " << std::accumulate(durations.begin(), durations.end(), 0) / durations.size() << " microseconds per iteration for this search." << std::endl;
-
     MCTSNode<S,A> *tree = trees[0];
     for (auto i = 1; i < trees.size(); i++) {
       tree->merge(trees[i]);
@@ -338,8 +334,6 @@ public:
     });
 
     auto child = *std::find_if(this->children.begin(), this->children.end(), [&,this](auto child){ return child->state == this->mdp.tr(this->state, ret); });
-
-    apprentice.train(child->state, child->expected.value());
     return ret;
   };
 };
@@ -361,7 +355,6 @@ int uci_chess() {
     return moves;
   };
 
-  // FIXME(design): make reward non-optional?
   std::optional<double> (*reward)(thc::ChessRules s) = [](thc::ChessRules cr) {
     thc::TERMINAL eval;
     cr.Evaluate(eval);
@@ -503,9 +496,22 @@ int uci_chess() {
       bool over = false;
       auto played = std::vector<std::string>();
       auto num_turns = 0;
+      std::vector<thc::ChessRules> states;
+
       for (int num_turns = 0; num_turns < steps; num_turns += 1) {
         if (num_turns == 0 || over) {
+          if (over) {
+            // train step
+            int parity = 1;
+            double reward = *mdp.reward(*(states.end()-1));
+            for (auto state = states.end(); state-- != states.begin();) {
+              apprentice->train(*state, reward*parity);
+              parity *= -1;
+            }
+          }
+
           std::cout << "Starting new game" << std::endl;
+          states = std::vector<thc::ChessRules>();
           board = thc::ChessRules();
           root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, board, std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
           cur_node = root.get();
@@ -513,6 +519,7 @@ int uci_chess() {
           display_position(board, "Initial position");
           over = false;
         }
+        states.push_back(board);
         std::cout << "Step " << num_turns << std::endl;
         std::cout << "\tWins: " << wins << std::endl;
         std::cout << "\tLosses: " << losses << std::endl;
