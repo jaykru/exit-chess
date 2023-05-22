@@ -14,6 +14,7 @@
 #include <mutex>
 #include <ranges>
 #include <torch/torch.h>
+#include <torch/script.h>
 #include "util.h"
 #include "tictactoe.h"
 #include "thc.h"
@@ -230,7 +231,7 @@ public:
         cur = cur->select(cur_itersm1, exploration_bias, apprentice).value(); // FIXME?: unsafe? what if select returns a nullopt?
       }
 
-      auto start = std::chrono::high_resolution_clock::now();      
+      auto start = std::chrono::high_resolution_clock::now();
 
       // EXPANSION
       if (!mdp.is_terminal(cur->state)) {
@@ -253,7 +254,7 @@ public:
       // BACKPROPAGATION
       cur->backprop();
 
-      auto stop = std::chrono::high_resolution_clock::now();      
+      auto stop = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
       durations_m.lock();
       durations.push_back(duration.count());
@@ -372,7 +373,7 @@ int uci_chess() {
       }
     } else {
       return std::optional(0.0);
-    } 
+    }
   };
 
   auto mdp = MDP<thc::ChessRules, std::string>(tr, reward, actions, board_is_terminal);
@@ -380,24 +381,34 @@ int uci_chess() {
   int wins = 0;
   int losses = 0;
   // if apprentice.pt exists, load it into `model` using torch::load
-  torch::nn::Sequential model = torch::nn::Sequential(
-                                                      {{"lin",torch::nn::Linear(8*8*13, 1)}, // take in an (8,8,13) board state
-                                                       {"relu",torch::nn::ReLU(1)}}
-                                                      );
+  torch::jit::script::Module model;
   if (std::filesystem::exists("apprentice.pt")) {
-    torch::load(model, "apprentice.pt");
+    try {
+        model = torch::jit::load("apprentice.pt");
+    } catch (const c10::Error &error) {
+        std::cerr << error.what() << std::endl;  
+        std::cerr << "Error loading the model" << std::endl;
+        return -1;
+    }
+  } else {
+    std::cerr << "[ERROR] Model not found." << std::endl;
+    return -1;
   }
 
-  model->to(torch::kCPU);
-  auto evalf = [&model](thc::ChessRules state) { return model->forward(board_to_tensor(state).view({-1,8*8*13}).to(torch::kCPU)).item<double>(); };
+  model.to(torch::kCUDA);
+  auto evalf = [&model](thc::ChessRules state) { return model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor()[-1].item<double>(); };
   auto trainf = [&model](thc::ChessRules state, double reward) {
     auto loss = torch::nn::MSELoss();
-    auto output = model->forward(board_to_tensor(state).view({-1,8*8*13}).to(torch::kCPU)).view({1});
-    auto target = torch::tensor({reward}).to(torch::kCPU);
+    auto output = model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor()[-1].view({1});
+    auto target = torch::tensor({reward}).to(torch::kCUDA);
     auto l = loss(output, target);
     l.backward();
-    torch::optim::SGD(model->parameters(), 0.01).step();
-    torch::optim::SGD(model->parameters(), 0.01).zero_grad();
+    std::vector<torch::Tensor> parameters;
+    for (auto parameter : model.parameters()) {
+      parameters.push_back(parameter);
+    }
+    torch::optim::SGD(parameters, 0.01).step();
+    torch::optim::SGD(parameters, 0.01).zero_grad();
   };
   auto apprentice = new Apprentice<thc::ChessRules>(evalf, trainf);
   auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
@@ -482,10 +493,10 @@ int uci_chess() {
     if (toks[0] == "quit") {
       // dump apprentice model to disk
       // if apprentice.pt already exists, delete it
-      if (std::filesystem::exists("apprentice.pt")) {
-        std::filesystem::remove("apprentice.pt");
-      }
-      torch::save(model, "apprentice.pt");
+      // if (std::filesystem::exists("apprentice.pt")) {
+      //   std::filesystem::remove("apprentice.pt");
+      // }
+      model.save("apprentice.pt");
       delete apprentice;
       return 0;
     }

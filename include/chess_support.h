@@ -22,22 +22,19 @@ bool board_is_terminal(thc::ChessRules board) {
 }
 
 torch::Tensor board_to_tensor(thc::ChessRules board) {
-  // returns a 8x8x13 tensor representing the board
-  // the 13 channels are:
-  // 0: white pawn
-  // 1: white knight
-  // 2: white bishop
-  // 3: white rook
-  // 4: white queen
-  // 5: white king
-  // 6: black pawn
-  // 7: black knight
-  // 8: black bishop
-  // 9: black rook
-  // 10: black queen
-  // 11: black king
-  // 12: blank
-  torch::Tensor tensor = torch::zeros({8, 8, 13});
+  // returns a 119x8x8 tensor representing the board
+
+  // the first 6 planes are binary encodings of the white piece
+  // positions: first place is pawns, etc.
+  //
+  // the next 6 planes are a binary encoding of the black piece positions along
+  // the same lines.
+  //
+  // For now, the remaining planes are unused, but will later be used to
+  // represent the previous k positions so the model can understand repetitions
+  // and shit.
+
+  torch::Tensor tensor = torch::zeros({119, 8, 8});
   for (int row = 0; row < 8; row++) {
     for (int col = 0; col < 8; col++) {
       char piece = board.squares[row*8 + col];
@@ -71,8 +68,10 @@ torch::Tensor board_to_tensor(thc::ChessRules board) {
         channel = 11;
       } else {
         channel = 12;
+        /* std::cout << "bad piece: " << piece << std::endl;
+        throw std::runtime_error("[ERROR]: invalid piece"); */
       }
-      tensor[row][col][channel] = 1;
+      tensor[channel][row][col] = 1;
     }
   }
   return tensor;
