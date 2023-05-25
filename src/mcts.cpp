@@ -28,15 +28,16 @@ std::mutex durations_m;
 template <class S>
 class Apprentice {
   public:
+    std::function<torch::Tensor(S)> action_dist;
     std::function<double(S)> eval;
     std::function<void(S, double)> train;
-    Apprentice(std::function<double(S)> eval, std::function<void(S, double)> train): eval(eval), train(train) {  };
+    Apprentice(std::function<torch::Tensor(S)> action_dist, std::function<double(S)> eval, std::function<void(S, double)> train): action_dist(action_dist), eval(eval), train(train) {  };
 };
 
 template <typename S, typename A>
 class MDP {
   public:
-    std::function<S(S s, A a)> tr; // transition function, not really a MDP 
+    std::function<S(S s, A a)> tr; // transition function, not really a MDP
     std::function<std::vector<A>(S s)> actions; // actions at s
     std::function<std::optional<double>(S s)> reward; // reward at s
     std::function<bool(S s)> is_terminal; // is s terminal?
@@ -56,11 +57,11 @@ public:
   double tot;
   int count;
 
-  MCTSNode(MDP<S,A> mdp, S state, std::vector<MCTSNode<S,A>*> children, std::optional<MCTSNode<S,A>*> parent) 
+  MCTSNode(MDP<S,A> mdp, S state, std::vector<MCTSNode<S,A>*> children, std::optional<MCTSNode<S,A>*> parent)
   : mdp(mdp), state(state), children(children), parent(parent), expected(std::nullopt), tot(0), count(0) {  };
 
-  MCTSNode(const MCTSNode<S,A> &other, std::optional<MCTSNode<S,A>*> parent): 
-    mdp(other.mdp), state(other.state), children(std::vector<MCTSNode<S,A>*>()), parent(parent), expected(other.expected), tot(other.tot), count(other.count) 
+  MCTSNode(const MCTSNode<S,A> &other, std::optional<MCTSNode<S,A>*> parent):
+    mdp(other.mdp), state(other.state), children(std::vector<MCTSNode<S,A>*>()), parent(parent), expected(other.expected), tot(other.tot), count(other.count)
     {
       for (auto child : other.children) {
         this->children.push_back(new MCTSNode<S,A>(*child, this));
@@ -109,7 +110,7 @@ public:
     }
   }
 
-  MCTSNode* play(std::vector<A> actions) {  
+  MCTSNode* play(std::vector<A> actions) {
     MCTSNode* cur = this;
     for (auto action : actions) {
       auto child = std::find_if(cur->children.begin(), cur->children.end(),
@@ -124,7 +125,7 @@ public:
         cur = next_node;
       }
     }
-    return cur;    
+    return cur;
   }
 
   void debug() {
@@ -148,7 +149,7 @@ public:
   }
 
   inline void backprop() {
-    MCTSNode* cur = this;  
+    MCTSNode* cur = this;
     auto mreward = mdp.reward(cur->state);
     if (!mreward.has_value()) {
       throw std::runtime_error("[ERROR]: no reward at terminal state; check your MDP.");
@@ -169,7 +170,7 @@ public:
     cur->count += 1;
     cur->expected = cur->tot / cur->count;
   }
-  
+
   inline double score(int cur_itersm1, double exploration_bias, Apprentice<S> apprentice) {
       auto bonus_weight = 0.5;
       auto exploration_term = exploration_bias * sqrt((double)log((double)this->parent.value()->count + (double)1.0) / ((double)this->count + (double)1.0));
@@ -187,12 +188,43 @@ public:
       return select_randomly(g, children);
     }
 
-    auto nonapprentice = Apprentice<S>([](S s) { return 0.0; }, [](S s, double d) { });
+    // get the distribution from the apprentice
+    auto dist = apprentice.action_dist(this->state);
 
-    auto choice = *argmax(children.begin(), children.end(), [&](MCTSNode<S,A>* child) { return child->score(cur_itersm1, exploration_bias, apprentice); });
-    auto nonchoice = *argmax(children.begin(), children.end(), [&](MCTSNode<S,A>* child) { return child->score(cur_itersm1, exploration_bias, nonapprentice); });
-    // FIXME: right bias if all scores are equal
-    return choice;
+    for (;;) {
+      // normalize dist
+      dist /= dist.sum();
+
+      // sample from the distribution tensor with libtorch
+      at::Tensor tmp = torch::multinomial(dist, 1, true)[0][0];
+      auto sample = tmp.item<int>();
+
+      // convert the index into a move
+
+      // FIXME: this is hardcoded. it would be nicer if we could actually just roll
+      // this into the apprentice somehow, with a sample method that returns an
+      // action.
+      int src = sample / 64;
+      int tgt = sample % 64;
+
+      // create a string representation of the move
+      std::string move = "";
+      move += (char)(src % 8 + 'a');
+      move += (char)(src / 8 + '1');
+      move += (char)(tgt % 8 + 'a');
+      move += (char)(tgt / 8 + '1');
+
+      // select the child which would result from playing `move`, if one exists
+      auto child = std::find_if(children.begin(),
+                                children.end(),
+                                [&move, this](MCTSNode<S,A>* child) {
+                                  return child->state == mdp.tr(child->parent.value()->state, move);
+                                }
+                              );
+      if (child != children.end()) {
+        return *child;
+      }
+    }
   }
 
   // Expands `node` and returns a randomly selected child node.
@@ -410,7 +442,11 @@ int uci_chess() {
     torch::optim::SGD(parameters, 0.01).step();
     torch::optim::SGD(parameters, 0.01).zero_grad();
   };
-  auto apprentice = new Apprentice<thc::ChessRules>(evalf, trainf);
+  auto action_dist = [&model](thc::ChessRules state) {
+    torch::Tensor fwd_tensor = model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensorList()[0];
+    return fwd_tensor.slice(0, 0, fwd_tensor.size(0) - 1);
+  };
+  auto apprentice = new Apprentice<thc::ChessRules>(action_dist, evalf, trainf);
   auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
   
   auto cur_node = root.get();
