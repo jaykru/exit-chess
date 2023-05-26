@@ -25,13 +25,13 @@ std::mt19937 g(rd());
 auto durations = std::vector<double>();
 std::mutex durations_m;
 
-template <class S>
+template <class S, class A>
 class Apprentice {
   public:
     std::function<torch::Tensor(S)> action_dist;
     std::function<double(S)> eval;
-    std::function<void(S, double)> train;
-    Apprentice(std::function<torch::Tensor(S)> action_dist, std::function<double(S)> eval, std::function<void(S, double)> train): action_dist(action_dist), eval(eval), train(train) {  };
+    std::function<void(std::vector<S>, std::vector<A>, double)> train;
+    Apprentice(std::function<torch::Tensor(S)> action_dist, std::function<double(S)> eval, std::function<void(std::vector<S>, std::vector<A>, double)> train): action_dist(action_dist), eval(eval), train(train) {  };
 };
 
 template <typename S, typename A>
@@ -171,14 +171,14 @@ public:
     cur->expected = cur->tot / cur->count;
   }
 
-  inline double score(int cur_itersm1, double exploration_bias, Apprentice<S> apprentice) {
+  inline double score(int cur_itersm1, double exploration_bias, Apprentice<S,A> apprentice) {
       auto bonus_weight = 0.5;
       auto exploration_term = exploration_bias * sqrt((double)log((double)this->parent.value()->count + (double)1.0) / ((double)this->count + (double)1.0));
       auto exp = this->expected.value_or(0.0);
       return exp + bonus_weight * apprentice.eval(this->state) + exploration_bias * exploration_term;
   }
 
-  inline std::optional<MCTSNode<S,A>*> select(int cur_itersm1, double exploration_bias, Apprentice<S> apprentice) {
+  inline std::optional<MCTSNode<S,A>*> select(int cur_itersm1, double exploration_bias, Apprentice<S,A> apprentice) {
     if (children.size() == 0) {
       return std::nullopt;
     }
@@ -196,7 +196,7 @@ public:
       dist /= dist.sum();
 
       // sample from the distribution tensor with libtorch
-      at::Tensor tmp = torch::multinomial(dist, 1, true)[0][0];
+      at::Tensor tmp = torch::multinomial(dist, 1, true)[0];
       auto sample = tmp.item<int>();
 
       // convert the index into a move
@@ -213,6 +213,12 @@ public:
       move += (char)(src / 8 + '1');
       move += (char)(tgt % 8 + 'a');
       move += (char)(tgt / 8 + '1');
+
+      // continue if move isn't legal
+      auto legal_moves = mdp.actions(this->state);
+      if (std::find(legal_moves.begin(), legal_moves.end(), move) == legal_moves.end()) {
+        continue;
+      }
 
       // select the child which would result from playing `move`, if one exists
       auto child = std::find_if(children.begin(),
@@ -251,7 +257,7 @@ public:
   // search for iters iterations, starting from start
   // exploration_bias is the exploration term in the UCB1 formula
   // apprentice is what it sounds like. FIXME: better comment here.
-  A search(int iters, float exploration_bias, Apprentice<S> apprentice) {
+  A search(int iters, float exploration_bias, Apprentice<S,A> apprentice) {
     if (mdp.actions(this->state).size() == 0) {
       throw std::runtime_error("[ERROR]: search called on state we can't act in");
     }
@@ -316,7 +322,7 @@ public:
   };
 
   // root-parallel search
-  A par_search(int iters, float exploration_bias, Apprentice<S> apprentice) {
+  A par_search(int iters, float exploration_bias, Apprentice<S,A> apprentice) {
     assert (!this->mdp.is_terminal(this->state));
     auto num_threads = std::thread::hardware_concurrency();
     auto num_iters_per_thread = iters / num_threads;
@@ -429,24 +435,43 @@ int uci_chess() {
 
   model.to(torch::kCUDA);
   auto evalf = [&model](thc::ChessRules state) { return model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor()[-1].item<double>(); };
-  auto trainf = [&model](thc::ChessRules state, double reward) {
-    auto loss = torch::nn::MSELoss();
-    auto output = model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor()[-1].view({1});
-    auto target = torch::tensor({reward}).to(torch::kCUDA);
-    auto l = loss(output, target);
-    l.backward();
-    std::vector<torch::Tensor> parameters;
-    for (auto parameter : model.parameters()) {
-      parameters.push_back(parameter);
+  auto trainf = [&model](std::vector<thc::ChessRules> states, std::vector<std::string> actions, double reward) {
+    // trains on the results from a single step of self-play
+    int parity = 1;
+    for (int i = 0; i < states.size()-1; i++) {
+      auto loss = torch::nn::MSELoss();
+      torch::Tensor output = model.forward({board_to_tensor(states[i]).to(torch::kCUDA).view({1,119,8,8})}).toTensor();
+
+      // convert the action to a tensor
+      torch::Tensor action_tensor = torch::zeros({4096}).to(torch::kCUDA);
+
+      // action[i] is a string representing the chess move taken at states[i],
+      // we need to convert it to a pair of indices ((i1,j1),(i2,j2)) indicating
+      // the source and target of the move.
+      auto src_str = actions[i].substr(0,2);
+      auto dst_str = actions[i].substr(2,2);
+      auto src = std::make_pair(src_str[0]-'a', src_str[1]-'1');
+      auto dst = std::make_pair(dst_str[0]-'a', dst_str[1]-'1');
+      action_tensor[src.first*src.second * dst.first*dst.second] = 1;
+
+      std::vector<torch::Tensor> tgt = {action_tensor,torch::tensor({reward*parity})};
+      auto target = torch::cat(tgt, 0).to(torch::kCUDA);
+      auto l = loss(output, target);
+      l.backward();
+      std::vector<torch::Tensor> parameters;
+      for (auto parameter : model.parameters()) {
+        parameters.push_back(parameter);
+      }
+      torch::optim::SGD(parameters, 0.01).step();
+      torch::optim::SGD(parameters, 0.01).zero_grad();
+      parity *= -1;
     }
-    torch::optim::SGD(parameters, 0.01).step();
-    torch::optim::SGD(parameters, 0.01).zero_grad();
   };
   auto action_dist = [&model](thc::ChessRules state) {
-    torch::Tensor fwd_tensor = model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensorList()[0];
+    torch::Tensor fwd_tensor = model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor();
     return fwd_tensor.slice(0, 0, fwd_tensor.size(0) - 1);
   };
-  auto apprentice = new Apprentice<thc::ChessRules>(action_dist, evalf, trainf);
+  auto apprentice = new Apprentice<thc::ChessRules, std::string>(action_dist, evalf, trainf);
   auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
   
   auto cur_node = root.get();
@@ -544,17 +569,21 @@ int uci_chess() {
       auto played = std::vector<std::string>();
       auto num_turns = 0;
       std::vector<thc::ChessRules> states;
+      std::vector<std::string> actions;
 
       for (int num_turns = 0; num_turns < steps; num_turns += 1) {
         if (num_turns == 0 || over) {
           if (over) {
             // train step
-            int parity = 1;
+            // TODO: batch this
+            // TODO: train with state-action pairs as well
+            //
+            // apprentice.train() needs to take in a list of states, a list of actions, and a reward
+            // the reward is the reward for the last state
+
+            // train will handle all of the parity concerns internally.
             double reward = *mdp.reward(*(states.end()-1));
-            for (auto state = states.end(); state-- != states.begin();) {
-              apprentice->train(*state, reward*parity);
-              parity *= -1;
-            }
+            apprentice->train(states, actions, reward);
           }
 
           std::cout << "Starting new game" << std::endl;
@@ -580,6 +609,7 @@ int uci_chess() {
         cur_node = root.get()->play(played);
         cur_node->state = board;
         auto best_move_str = cur_node->par_search(800, 0.5, *apprentice);
+        actions.push_back(best_move_str);
         thc::Move best_move;
         best_move.TerseIn(&board, best_move_str.c_str());
         board.PushMove(best_move);
