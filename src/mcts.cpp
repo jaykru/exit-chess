@@ -22,8 +22,6 @@
 
 std::random_device rd;
 std::mt19937 g(rd());
-auto durations = std::vector<double>();
-std::mutex durations_m;
 
 template <class S, class A>
 class Apprentice {
@@ -188,49 +186,12 @@ public:
       return select_randomly(g, children);
     }
 
-    // get the distribution from the apprentice
-    auto dist = apprentice.action_dist(this->state);
-
-    for (;;) {
-      // normalize dist
-      dist /= dist.sum();
-
-      // sample from the distribution tensor with libtorch
-      at::Tensor tmp = torch::multinomial(dist, 1, true)[0];
-      auto sample = tmp.item<int>();
-
-      // convert the index into a move
-
-      // FIXME: this is hardcoded. it would be nicer if we could actually just roll
-      // this into the apprentice somehow, with a sample method that returns an
-      // action.
-      int src = sample / 64;
-      int tgt = sample % 64;
-
-      // create a string representation of the move
-      std::string move = "";
-      move += (char)(src % 8 + 'a');
-      move += (char)(src / 8 + '1');
-      move += (char)(tgt % 8 + 'a');
-      move += (char)(tgt / 8 + '1');
-
-      // continue if move isn't legal
-      auto legal_moves = mdp.actions(this->state);
-      if (std::find(legal_moves.begin(), legal_moves.end(), move) == legal_moves.end()) {
-        continue;
-      }
-
-      // select the child which would result from playing `move`, if one exists
-      auto child = std::find_if(children.begin(),
-                                children.end(),
-                                [&move, this](MCTSNode<S,A>* child) {
-                                  return child->state == mdp.tr(child->parent.value()->state, move);
-                                }
-                              );
-      if (child != children.end()) {
-        return *child;
-      }
-    }
+    // otherwise pick the child with the best UCT score
+    auto best = std::max_element(children.begin(), children.end(),
+                                 [cur_itersm1, exploration_bias, apprentice](MCTSNode<S,A>* a, MCTSNode<S,A>* b) {
+                                   return a->score(cur_itersm1, exploration_bias, apprentice) < b->score(cur_itersm1, exploration_bias, apprentice);
+                                 });
+    return *best;
   }
 
   // Expands `node` and returns a randomly selected child node.
@@ -262,41 +223,77 @@ public:
       throw std::runtime_error("[ERROR]: search called on state we can't act in");
     }
     for (auto cur_itersm1 = 0; cur_itersm1 < iters; cur_itersm1++) {
+      std::cout << "iteration " << cur_itersm1 << std::endl;
       MCTSNode<S,A>* cur = this;
 
-      // SELECTION      
+      // SELECTION
+      // std::cout << "selecting..." << std::endl;
       while (!cur->is_leaf()) {
         cur = cur->select(cur_itersm1, exploration_bias, apprentice).value(); // FIXME?: unsafe? what if select returns a nullopt?
       }
 
-      auto start = std::chrono::high_resolution_clock::now();
-
+      // std::cout << "expanding..." << std::endl;
       // EXPANSION
       if (!mdp.is_terminal(cur->state)) {
         auto expanded_child = cur->expand();
         cur = expanded_child;
       }
 
+      // std::cout << "rolling out..." << std::endl;
       // ROLLOUT
       std::vector<std::unique_ptr<MCTSNode<S,A>>> rollout_nodes;
       while (!mdp.is_terminal(cur->state)) {
-        auto actions = mdp.actions(cur->state);
-        if (actions.size() == 0) {
-           throw std::runtime_error("[ERROR]: no actions available at non-terminal state");
+        std::unique_ptr<MCTSNode<S,A>> choice;
+        auto legal_moves = mdp.actions(cur->state);
+        if (legal_moves.size() == 0) {
+          throw std::runtime_error("[ERROR]: no actions available at non-terminal state");
         }
-        std::unique_ptr<MCTSNode<S,A>> choice = std::make_unique<MCTSNode<S,A>>(cur, mdp.tr(cur->state, select_randomly(g, actions)));
+        int tries = 0;
+        for (;;) {
+          if (tries > 3) {
+            // too many tries to sample a legal move from the net, we're just
+            // going to do a random rollout here.
+            choice = std::make_unique<MCTSNode<S,A>>(cur, mdp.tr(cur->state, select_randomly(g, legal_moves)));
+            break;
+          }
+          tries += 1;
+          // get the distribution from the apprentice
+          auto dist = apprentice.action_dist(this->state);
+          // sample from the distribution tensor with libtorch
+          at::Tensor tmp = torch::multinomial(dist, 1, true)[0];
+          auto sample = tmp.item<int>();
+
+          // convert the index into a move
+
+          // FIXME: this is hardcoded. it would be nicer if we could actually just roll
+          // this into the apprentice somehow, with a sample method that returns an
+          // action.
+          int src = sample / 64;
+          int tgt = sample % 64;
+
+          // create a string representation of the move
+          std::string move = "";
+          move += (char)(src % 8 + 'a');
+          move += (char)(src / 8 + '1');
+          move += (char)(tgt % 8 + 'a');
+          move += (char)(tgt / 8 + '1');
+
+          // re-sample if move isn't legal
+          if (std::find(legal_moves.begin(), legal_moves.end(), move) == legal_moves.end()) {
+            continue;
+          }
+
+          // make the child that would result from playing `move`
+          choice = std::make_unique<MCTSNode<S,A>>(cur, mdp.tr(cur->state, move));
+          break;
+        }
         cur = choice.get();
         rollout_nodes.push_back(std::move(choice));
       }
 
+      // std::cout << "backpropagating..." << std::endl;
       // BACKPROPAGATION
       cur->backprop();
-
-      auto stop = std::chrono::high_resolution_clock::now();
-      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-      durations_m.lock();
-      durations.push_back(duration.count());
-      durations_m.unlock();
     }
 
     // return the action resulting in the child with the highest expected value
@@ -317,7 +314,8 @@ public:
       throw std::runtime_error("[ERROR]: no actions available at non-terminal state");
     }
 
-    auto child = *std::find_if(this->children.begin(), this->children.end(), [&,this](auto child){ return child->state == this->mdp.tr(this->state, *ret); });    
+    auto child = *std::find_if(this->children.begin(), this->children.end(), [&,this](auto child){ return child->state == this->mdp.tr(this->state, *ret); });
+    std::cout << "search complete!" << std::endl;
     return *ret;
   };
 
@@ -572,6 +570,10 @@ int uci_chess() {
       std::vector<std::string> actions;
 
       for (int num_turns = 0; num_turns < steps; num_turns += 1) {
+        if (num_turns % 5 == 0) {
+          std::cout << "Saving the current model." << std::endl;
+          model.save("apprentice.pt");
+        }
         if (num_turns == 0 || over) {
           if (over) {
             // train step
