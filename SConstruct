@@ -1,6 +1,8 @@
 # SConstruct file
 import os
-env = DefaultEnvironment()
+env = Environment(COMPILATIONDB_USE_ABSPATH=True)
+env.Tool('compilation_db')
+env.CompilationDatabase()
 
 libtorch_path = "./libtorch"
 
