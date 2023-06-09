@@ -96,6 +96,9 @@ thc::Move str_to_move(thc::ChessRules cr, std::string str) {
   if (!move.TerseIn(&cr, str.c_str())) {
     std::cout << "invalid move string: " << str << std::endl;
     std::cout << "not in legal moves: " << std::endl;
+    if (get_legal_moves(cr).size() == 0) {
+      std::cout << "[BAD!] no legal moves in str_to_move" << std::endl;
+    }
     for (auto mv : get_legal_moves(cr)) {
       std::cout << move_to_str(cr, mv) << std::endl;
     }

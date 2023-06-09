@@ -15,6 +15,7 @@
 #include <ranges>
 #include <torch/torch.h>
 #include <torch/script.h>
+#include <boost/python.hpp>
 #include "util.h"
 #include "tictactoe.h"
 #include "thc.h"
@@ -215,50 +216,27 @@ public:
     return choice;
   }
 
-  // search for iters iterations, starting from start
-  // exploration_bias is the exploration term in the UCB1 formula
-  // apprentice is what it sounds like. FIXME: better comment here.
-  A search(int iters, float exploration_bias, Apprentice<S,A> apprentice) {
-    if (mdp.actions(this->state).size() == 0) {
-      throw std::runtime_error("[ERROR]: search called on state we can't act in");
-    }
-    for (auto cur_itersm1 = 0; cur_itersm1 < iters; cur_itersm1++) {
-      std::cout << "iteration " << cur_itersm1 << std::endl;
+    inline std::unique_ptr<MCTSNode<S, A>> dm_rollout() {
       MCTSNode<S,A>* cur = this;
-
-      // SELECTION
-      // std::cout << "selecting..." << std::endl;
-      while (!cur->is_leaf()) {
-        cur = cur->select(cur_itersm1, exploration_bias, apprentice).value(); // FIXME?: unsafe? what if select returns a nullopt?
-      }
-
-      // std::cout << "expanding..." << std::endl;
-      // EXPANSION
-      if (!mdp.is_terminal(cur->state)) {
-        auto expanded_child = cur->expand();
-        cur = expanded_child;
-      }
-
-      // std::cout << "rolling out..." << std::endl;
-      // ROLLOUT
-      std::vector<std::unique_ptr<MCTSNode<S,A>>> rollout_nodes;
+      std::unique_ptr<MCTSNode<S,A>> choice = std::unique_ptr<MCTSNode<S,A>>(cur);
       while (!mdp.is_terminal(cur->state)) {
-        std::unique_ptr<MCTSNode<S,A>> choice;
         auto legal_moves = mdp.actions(cur->state);
-        if (legal_moves.size() == 0) {
+        if (legal_moves.size() < 1) {
           throw std::runtime_error("[ERROR]: no actions available at non-terminal state");
         }
         int tries = 0;
         for (;;) {
+          assert(legal_moves.size() > 0);
           if (tries > 3) {
             // too many tries to sample a legal move from the net, we're just
             // going to do a random rollout here.
-            choice = std::make_unique<MCTSNode<S,A>>(cur, mdp.tr(cur->state, select_randomly(g, legal_moves)));
+            assert(legal_moves.size() > 0);
+            choice = std::make_unique<MCTSNode<S,A>>(cur->mdp, mdp.tr(cur->state, select_randomly(g, legal_moves)), std::vector<MCTSNode<S,A>*>(), cur);
             break;
           }
           tries += 1;
           // get the distribution from the apprentice
-          auto dist = apprentice.action_dist(this->state);
+          auto dist = cur->apprentice.action_dist(this->state);
           // sample from the distribution tensor with libtorch
           at::Tensor tmp = torch::multinomial(dist, 1, true)[0];
           auto sample = tmp.item<int>();
@@ -284,12 +262,61 @@ public:
           }
 
           // make the child that would result from playing `move`
-          choice = std::make_unique<MCTSNode<S,A>>(cur, mdp.tr(cur->state, move));
+          choice = std::make_unique<MCTSNode<S,A>>(cur->mdp, mdp.tr(cur->state, move), std::vector<MCTSNode<S,A>*>(), cur);
+          std::cout << "Selecting move: " << move << " from " << legal_moves << std::endl;
           break;
         }
         cur = choice.get();
-        rollout_nodes.push_back(std::move(choice));
       }
+      return choice;
+    }
+
+    inline std::unique_ptr<MCTSNode<S, A>> basic_rollout() {
+      // ROLLOUT
+      printf("In rollout\n");
+      std::unique_ptr<MCTSNode<S, A>> choice = std::unique_ptr<MCTSNode<S, A>>(this);
+      MCTSNode* cur = choice.get();
+      while (!mdp.is_terminal(cur->state)) {
+        auto actions = mdp.actions(cur->state);
+        if (actions.size() == 0) {
+           throw std::runtime_error("[ERROR]: no actions available at non-terminal state");
+        }
+        auto action = select_randomly(g, actions);
+        std::cout << "Selecting " << action << " from " << actions << std::endl;
+        std::unique_ptr<MCTSNode<S,A>> choice = std::make_unique<MCTSNode<S,A>>(cur, mdp.tr(cur->state, action));
+        cur = choice.get();
+      }
+      printf("Left rollout\n");
+      return choice;
+    }
+
+  // search for iters iterations, starting from start
+  // exploration_bias is the exploration term in the UCB1 formula
+  // apprentice is what it sounds like. FIXME: better comment here.
+  A search(int iters, float exploration_bias, Apprentice<S,A> apprentice) {
+    if (mdp.actions(this->state).size() == 0) {
+      throw std::runtime_error("[ERROR]: search called on state we can't act in");
+    }
+    for (auto cur_itersm1 = 0; cur_itersm1 < iters; cur_itersm1++) {
+      std::cout << "iteration " << cur_itersm1 << std::endl;
+      MCTSNode<S,A>* cur = this;
+
+      // SELECTION
+      // std::cout << "selecting..." << std::endl;
+      while (!cur->is_leaf()) {
+        cur = cur->select(cur_itersm1, exploration_bias, apprentice).value(); // FIXME?: unsafe? what if select returns a nullopt?
+      }
+
+      // std::cout << "expanding..." << std::endl;
+      // EXPANSION
+      if (!mdp.is_terminal(cur->state)) {
+        auto expanded_child = cur->expand();
+        cur = expanded_child;
+      }
+
+      // ROLLOUT
+      auto rollout_node = cur->basic_rollout();
+      cur = rollout_node.get();
 
       // std::cout << "backpropagating..." << std::endl;
       // BACKPROPAGATION
@@ -380,6 +407,7 @@ int uci_chess() {
   // this is a lambda function that takes a position and a move and returns a new position
   thc::ChessRules (*tr)(thc::ChessRules s, std::string a) = [](thc::ChessRules cr, std::string mv) {
     auto new_board = thc::ChessRules(cr);
+    assert(get_legal_moves(new_board) == get_legal_moves(cr));
     new_board.PlayMove(str_to_move(cr, mv));
     return new_board;
   };

@@ -11,7 +11,7 @@ env.Append(LINKFLAGS=[# "-static",
                       #    for dir in dirs]
            )
 
-env.Append(LIBS=['torch', 'torch_cpu', 'torch_cuda', 'torch_global_deps', 'c10'] + ['pthread'] if os.name == 'posix' else [])
+env.Append(LIBS=['torch', 'torch_cpu', 'torch_hip', 'rocblas', 'torch_global_deps', 'c10'] + ['pthread'] if os.name == 'posix' else [])
 env.Append(LIBPATH=[libtorch_path + '/lib'])
 
 # Add the vendored dependencies to the include and library paths

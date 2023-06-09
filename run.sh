@@ -10,6 +10,6 @@ else
     if [[ -z "${DEBUG}" ]]; then
         HSA_OVERRIDE_GFX_VERSION=10.3.0 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/libtorch/lib ./main
     else
-        HSA_OVERRIDE_GFX_VERSION=10.3.0 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/libtorch/lib lldb ./main
+        HSA_OVERRIDE_GFX_VERSION=10.3.0 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/libtorch/lib gdb ./main
     fi
 fi
