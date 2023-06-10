@@ -15,7 +15,6 @@
 #include <ranges>
 #include <torch/torch.h>
 #include <torch/script.h>
-#include <boost/python.hpp>
 #include "util.h"
 #include "tictactoe.h"
 #include "thc.h"
@@ -57,11 +56,15 @@ public:
   int count;
 
   MCTSNode(MDP<S,A> mdp, S state, std::vector<MCTSNode<S,A>*> children, std::optional<MCTSNode<S,A>*> parent)
-  : mdp(mdp), state(state), children(children), parent(parent), expected(std::nullopt), tot(0), count(0) {  };
+  : mdp(mdp), state(state), children(children), parent(parent), expected(std::nullopt), tot(0), count(0)
+    {
+      assert(!this->parent.has_value() || this->parent.value() != nullptr);
+    };
 
   MCTSNode(const MCTSNode<S,A> &other, std::optional<MCTSNode<S,A>*> parent):
     mdp(other.mdp), state(other.state), children(std::vector<MCTSNode<S,A>*>()), parent(parent), expected(other.expected), tot(other.tot), count(other.count)
     {
+      assert(!this->parent.has_value() || this->parent.value() != nullptr);
       for (auto child : other.children) {
         this->children.push_back(new MCTSNode<S,A>(*child, this));
       }
@@ -271,23 +274,23 @@ public:
       return choice;
     }
 
-    inline std::unique_ptr<MCTSNode<S, A>> basic_rollout() {
+    inline std::vector<std::unique_ptr<MCTSNode<S, A>>> basic_rollout() {
       // ROLLOUT
-      printf("In rollout\n");
+      std::vector<std::unique_ptr<MCTSNode<S, A>>> rollout_nodes;
       std::unique_ptr<MCTSNode<S, A>> choice = std::unique_ptr<MCTSNode<S, A>>(this);
       MCTSNode* cur = choice.get();
+      rollout_nodes.push_back(std::move(choice));
       while (!mdp.is_terminal(cur->state)) {
         auto actions = mdp.actions(cur->state);
         if (actions.size() == 0) {
            throw std::runtime_error("[ERROR]: no actions available at non-terminal state");
         }
         auto action = select_randomly(g, actions);
-        std::cout << "Selecting " << action << " from " << actions << std::endl;
         std::unique_ptr<MCTSNode<S,A>> choice = std::make_unique<MCTSNode<S,A>>(cur, mdp.tr(cur->state, action));
         cur = choice.get();
+        rollout_nodes.push_back(std::move(choice));
       }
-      printf("Left rollout\n");
-      return choice;
+      return rollout_nodes;
     }
 
   // search for iters iterations, starting from start
@@ -298,7 +301,6 @@ public:
       throw std::runtime_error("[ERROR]: search called on state we can't act in");
     }
     for (auto cur_itersm1 = 0; cur_itersm1 < iters; cur_itersm1++) {
-      std::cout << "iteration " << cur_itersm1 << std::endl;
       MCTSNode<S,A>* cur = this;
 
       // SELECTION
@@ -315,8 +317,8 @@ public:
       }
 
       // ROLLOUT
-      auto rollout_node = cur->basic_rollout();
-      cur = rollout_node.get();
+      std::vector<std::unique_ptr<MCTSNode>> rollout_nodes = cur->basic_rollout();
+      cur = rollout_nodes.back().get();
 
       // std::cout << "backpropagating..." << std::endl;
       // BACKPROPAGATION
