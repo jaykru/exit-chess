@@ -66,7 +66,7 @@ public:
       count(0),
       apprentice(apprentice)
     {
-      assert(!this->parent.has_value() || this->parent.value() != nullptr);
+      // assert(!this->parent.has_value() || this->parent.value() != nullptr);
     };
 
     ExItNode(const ExItNode<S,A> &other, std::optional<ExItNode<S,A>*> parent):
@@ -79,7 +79,7 @@ public:
       tot(other.tot),
       count(other.count)
     {
-      assert(!this->parent.has_value() || this->parent.value() != nullptr);
+      // assert(!this->parent.has_value() || this->parent.value() != nullptr);
       for (auto child : other.children) {
         this->children.push_back(new ExItNode<S,A>(*child, this));
       }
@@ -191,10 +191,9 @@ public:
 
   inline double score(int cur_itersm1, double exploration_bias) {
       auto bonus_weight = 0.5;
-      auto exploration_term = exploration_bias * sqrt((double)log((double)this->parent.value()->count + (double)1.0) / ((double)this->count + (double)1.0));
+      auto exploration_term = sqrt((double)log((double)this->parent.value()->count + (double)1.0) / ((double)this->count + (double)1.0));
       auto exp = this->expected.value_or(0.0);
-      return exp + // bonus_weight * this->apprentice.eval(this->state) +
-        exploration_bias * exploration_term;
+      return exp + bonus_weight * this->apprentice.eval(this->state) + exploration_bias * exploration_term;
   }
 
   inline std::optional<ExItNode<S,A>*> select(int cur_itersm1, double exploration_bias) {
@@ -246,8 +245,8 @@ public:
         }
         int tries = 0;
         for (;;) {
-          assert(legal_moves.size() > 0);
-          if (tries > 3) {
+          // assert(legal_moves.size() > 0);
+          if (tries > 0) {
             // too many tries to sample a legal move from the net, we're just
             // going to do a random rollout here.
             cur = new ExItNode<S,A>(cur->mdp, cur->apprentice, mdp.tr(cur->state, select_randomly(g, legal_moves)), std::vector<ExItNode<S,A>*>(), cur);
@@ -309,7 +308,7 @@ public:
   // search for iters iterations, starting from start
   // exploration_bias is the exploration term in the UCB1 formula
   // apprentice is what it sounds like. FIXME: better comment here.
-  A search(int iters, float exploration_bias, Apprentice<S,A> apprentice) {
+  A search(int iters, float exploration_bias) {
     if (mdp.actions(this->state).size() == 0) {
       throw std::runtime_error("[ERROR]: search called on state we can't act in");
     }
@@ -368,7 +367,7 @@ public:
 
   // root-parallel search
   A par_search(int iters, float exploration_bias) {
-    assert (!this->mdp.is_terminal(this->state));
+    // assert (!this->mdp.is_terminal(this->state));
     auto num_threads = std::thread::hardware_concurrency();
     auto num_iters_per_thread = iters / num_threads;
     auto num_iters_last_thread = iters - (num_threads - 1) * num_iters_per_thread;
@@ -380,7 +379,7 @@ public:
       auto num_iters = i == num_threads - 1 ? num_iters_last_thread : num_iters_per_thread;
       threads.push_back(std::thread([=, &trees_m, &trees,this]() {
         ExItNode<S,A> *copy = new ExItNode<S,A>(*this, this->parent);
-        copy->search(num_iters, exploration_bias, apprentice);
+        copy->search(num_iters, exploration_bias);
         trees_m.lock();
         trees.push_back(copy);
         trees_m.unlock();
@@ -427,7 +426,7 @@ int uci_chess() {
   // this is a lambda function that takes a position and a move and returns a new position
   thc::ChessRules (*tr)(thc::ChessRules s, std::string a) = [](thc::ChessRules cr, std::string mv) {
     auto new_board = thc::ChessRules(cr);
-    assert(get_legal_moves(new_board) == get_legal_moves(cr));
+    // assert(get_legal_moves(new_board) == get_legal_moves(cr));
     new_board.PlayMove(str_to_move(cr, mv));
     return new_board;
   };
