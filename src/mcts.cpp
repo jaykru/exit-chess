@@ -45,46 +45,62 @@ class MDP {
 };
 
 template <typename S, typename A>
-class MCTSNode {
+class ExItNode {
 public:
   MDP<S,A> mdp;
+  Apprentice<S,A> apprentice;
   S state;
-  std::vector<MCTSNode<S,A>*> children;
-  std::optional<MCTSNode<S,A>*> parent;
+  std::vector<ExItNode<S,A>*> children;
+  std::optional<ExItNode<S,A>*> parent;
   std::optional<double> expected;
   double tot;
   int count;
 
-  MCTSNode(MDP<S,A> mdp, S state, std::vector<MCTSNode<S,A>*> children, std::optional<MCTSNode<S,A>*> parent)
-  : mdp(mdp), state(state), children(children), parent(parent), expected(std::nullopt), tot(0), count(0)
+  ExItNode(MDP<S,A> mdp, Apprentice<S,A> apprentice, S state, std::vector<ExItNode<S,A>*> children, std::optional<ExItNode<S,A>*> parent)
+    : mdp(mdp),
+      state(state),
+      children(children),
+      parent(parent),
+      expected(std::nullopt),
+      tot(0),
+      count(0),
+      apprentice(apprentice)
     {
       assert(!this->parent.has_value() || this->parent.value() != nullptr);
     };
 
-  MCTSNode(const MCTSNode<S,A> &other, std::optional<MCTSNode<S,A>*> parent):
-    mdp(other.mdp), state(other.state), children(std::vector<MCTSNode<S,A>*>()), parent(parent), expected(other.expected), tot(other.tot), count(other.count)
+    ExItNode(const ExItNode<S,A> &other, std::optional<ExItNode<S,A>*> parent):
+      apprentice(other.apprentice),
+      mdp(other.mdp),
+      state(other.state),
+      children(std::vector<ExItNode<S,A>*>()),
+      parent(parent),
+      expected(other.expected),
+      tot(other.tot),
+      count(other.count)
     {
       assert(!this->parent.has_value() || this->parent.value() != nullptr);
       for (auto child : other.children) {
-        this->children.push_back(new MCTSNode<S,A>(*child, this));
+        this->children.push_back(new ExItNode<S,A>(*child, this));
       }
     }
 
-  MCTSNode(MCTSNode<S,A>* parent, S state)
+  ExItNode(ExItNode<S,A>* parent, S state)
   : mdp(parent->mdp),
+    apprentice(parent->apprentice),
     state(state),
     parent(parent),
     tot(0),
     count(0)
   { };
 
-  ~MCTSNode() {
+  ~ExItNode() {
     for (auto child : children) {
       delete child;
     }
   }
 
-  void merge(MCTSNode<S,A> *other) {
+  void merge(ExItNode<S,A> *other) {
     // TODO: fill this in
     // if (this->is_root() && other->is_root() && this->state != other->state) {
     //   throw std::runtime_error("Can't merge two roots with different states");
@@ -101,28 +117,28 @@ public:
     for (auto their_child : other->children) {
       auto our_child = std::find_if(this->children.begin(),
                                     this->children.end(),
-                                    [their_child](MCTSNode<S,A>* our_child) {
+                                    [their_child](ExItNode<S,A>* our_child) {
                                       return our_child->state == their_child->state;
                                     });
       if (our_child != this->children.end()) {
         (*our_child)->merge(their_child);
       } else {
-        this->children.push_back(new MCTSNode<S,A>(*their_child,this));
+        this->children.push_back(new ExItNode<S,A>(*their_child,this));
       }
     }
   }
 
-  MCTSNode* play(std::vector<A> actions) {
-    MCTSNode* cur = this;
+  ExItNode* play(std::vector<A> actions) {
+    ExItNode* cur = this;
     for (auto action : actions) {
       auto child = std::find_if(cur->children.begin(), cur->children.end(),
-                                [&cur, &action](MCTSNode<S,A>* child)
+                                [&cur, &action](ExItNode<S,A>* child)
                                   { return cur->mdp.tr(cur->state, action) == child->state; });
       if (child != children.end() && !cur->children.empty()) {
         cur = *child;
       } else {
         auto next_state = cur->mdp.tr(cur->state, action);
-        auto next_node = new MCTSNode(cur, next_state);
+        auto next_node = new ExItNode(cur, next_state);
         cur->children.push_back(next_node);
         cur = next_node;
       }
@@ -151,7 +167,7 @@ public:
   }
 
   inline void backprop() {
-    MCTSNode* cur = this;
+    ExItNode* cur = this;
     auto mreward = mdp.reward(cur->state);
     if (!mreward.has_value()) {
       throw std::runtime_error("[ERROR]: no reward at terminal state; check your MDP.");
@@ -173,42 +189,43 @@ public:
     cur->expected = cur->tot / cur->count;
   }
 
-  inline double score(int cur_itersm1, double exploration_bias, Apprentice<S,A> apprentice) {
+  inline double score(int cur_itersm1, double exploration_bias) {
       auto bonus_weight = 0.5;
       auto exploration_term = exploration_bias * sqrt((double)log((double)this->parent.value()->count + (double)1.0) / ((double)this->count + (double)1.0));
       auto exp = this->expected.value_or(0.0);
-      return exp + bonus_weight * apprentice.eval(this->state) + exploration_bias * exploration_term;
+      return exp + // bonus_weight * this->apprentice.eval(this->state) +
+        exploration_bias * exploration_term;
   }
 
-  inline std::optional<MCTSNode<S,A>*> select(int cur_itersm1, double exploration_bias, Apprentice<S,A> apprentice) {
+  inline std::optional<ExItNode<S,A>*> select(int cur_itersm1, double exploration_bias) {
     if (children.size() == 0) {
       return std::nullopt;
     }
 
     // if all of the children have a null expected value, then select one at random
-    if (std::all_of(children.begin(), children.end(), [](MCTSNode<S,A>* child) { return child->expected == std::nullopt; })) {
+    if (std::all_of(children.begin(), children.end(), [](ExItNode<S,A>* child) { return child->expected == std::nullopt; })) {
       return select_randomly(g, children);
     }
 
     // otherwise pick the child with the best UCT score
-    auto best = std::max_element(children.begin(), children.end(),
-                                 [cur_itersm1, exploration_bias, apprentice](MCTSNode<S,A>* a, MCTSNode<S,A>* b) {
-                                   return a->score(cur_itersm1, exploration_bias, apprentice) < b->score(cur_itersm1, exploration_bias, apprentice);
-                                 });
+    auto best = argmax(children.begin(), children.end(),
+                       [&](ExItNode<S,A>* child) {
+                         return child->score(cur_itersm1, exploration_bias);
+                       });
     return *best;
   }
 
   // Expands `node` and returns a randomly selected child node.
-  inline MCTSNode<S,A> *expand() {
+  inline ExItNode<S,A> *expand() {
     if (this->children.size() == 0) {
       auto actions = mdp.actions(state);
       if (actions.size() == 0) {
           throw std::runtime_error("[ERROR]: no actions available for expansion");
       }
 
-      auto new_children = std::vector<MCTSNode<S,A>*>();
+      auto new_children = std::vector<ExItNode<S,A>*>();
       for (auto action : actions) {
-        auto child = new MCTSNode(this, this->mdp.tr(this->state, action));
+        auto child = new ExItNode(this, this->mdp.tr(this->state, action));
         new_children.push_back(child);
       }
       this->children.clear();
@@ -219,9 +236,9 @@ public:
     return choice;
   }
 
-    inline std::unique_ptr<MCTSNode<S, A>> dm_rollout() {
-      MCTSNode<S,A>* cur = this;
-      std::unique_ptr<MCTSNode<S,A>> choice = std::unique_ptr<MCTSNode<S,A>>(cur);
+    inline std::vector<ExItNode<S, A>*> dm_rollout() {
+      std::vector<ExItNode*> rollout_nodes;
+      ExItNode<S,A>* cur = this;
       while (!mdp.is_terminal(cur->state)) {
         auto legal_moves = mdp.actions(cur->state);
         if (legal_moves.size() < 1) {
@@ -233,8 +250,8 @@ public:
           if (tries > 3) {
             // too many tries to sample a legal move from the net, we're just
             // going to do a random rollout here.
-            assert(legal_moves.size() > 0);
-            choice = std::make_unique<MCTSNode<S,A>>(cur->mdp, mdp.tr(cur->state, select_randomly(g, legal_moves)), std::vector<MCTSNode<S,A>*>(), cur);
+            cur = new ExItNode<S,A>(cur->mdp, cur->apprentice, mdp.tr(cur->state, select_randomly(g, legal_moves)), std::vector<ExItNode<S,A>*>(), cur);
+            rollout_nodes.push_back(cur);
             break;
           }
           tries += 1;
@@ -265,30 +282,26 @@ public:
           }
 
           // make the child that would result from playing `move`
-          choice = std::make_unique<MCTSNode<S,A>>(cur->mdp, mdp.tr(cur->state, move), std::vector<MCTSNode<S,A>*>(), cur);
-          std::cout << "Selecting move: " << move << " from " << legal_moves << std::endl;
+          cur = new ExItNode<S,A>(cur->mdp, cur->apprentice, mdp.tr(cur->state, move), std::vector<ExItNode<S,A>*>(), cur);
+          rollout_nodes.push_back(cur);
           break;
         }
-        cur = choice.get();
       }
-      return choice;
+      return rollout_nodes;
     }
 
-    inline std::vector<std::unique_ptr<MCTSNode<S, A>>> basic_rollout() {
+    inline std::vector<ExItNode<S, A>*> basic_rollout() {
       // ROLLOUT
-      std::vector<std::unique_ptr<MCTSNode<S, A>>> rollout_nodes;
-      std::unique_ptr<MCTSNode<S, A>> choice = std::unique_ptr<MCTSNode<S, A>>(this);
-      MCTSNode* cur = choice.get();
-      rollout_nodes.push_back(std::move(choice));
+      std::vector<ExItNode<S, A>*> rollout_nodes; // nodes to be freed by caller
+      ExItNode* cur = this;
       while (!mdp.is_terminal(cur->state)) {
         auto actions = mdp.actions(cur->state);
         if (actions.size() == 0) {
            throw std::runtime_error("[ERROR]: no actions available at non-terminal state");
         }
         auto action = select_randomly(g, actions);
-        std::unique_ptr<MCTSNode<S,A>> choice = std::make_unique<MCTSNode<S,A>>(cur, mdp.tr(cur->state, action));
-        cur = choice.get();
-        rollout_nodes.push_back(std::move(choice));
+        cur = new ExItNode<S,A>(cur, mdp.tr(cur->state, action));
+        rollout_nodes.push_back(cur);
       }
       return rollout_nodes;
     }
@@ -301,12 +314,13 @@ public:
       throw std::runtime_error("[ERROR]: search called on state we can't act in");
     }
     for (auto cur_itersm1 = 0; cur_itersm1 < iters; cur_itersm1++) {
-      MCTSNode<S,A>* cur = this;
+      std::cout << "iteration " << cur_itersm1 << std::endl;
+      ExItNode<S,A>* cur = this;
 
       // SELECTION
       // std::cout << "selecting..." << std::endl;
       while (!cur->is_leaf()) {
-        cur = cur->select(cur_itersm1, exploration_bias, apprentice).value(); // FIXME?: unsafe? what if select returns a nullopt?
+        cur = cur->select(cur_itersm1, exploration_bias).value(); // FIXME?: unsafe? what if select returns a nullopt?
       }
 
       // std::cout << "expanding..." << std::endl;
@@ -317,12 +331,16 @@ public:
       }
 
       // ROLLOUT
-      std::vector<std::unique_ptr<MCTSNode>> rollout_nodes = cur->basic_rollout();
-      cur = rollout_nodes.back().get();
+      std::vector<ExItNode*> rollout_nodes = cur->dm_rollout();
+      cur = rollout_nodes.back();
 
       // std::cout << "backpropagating..." << std::endl;
       // BACKPROPAGATION
       cur->backprop();
+      // free the rollout nodes
+      for (auto node : rollout_nodes) {
+        delete node;
+      }
     }
 
     // return the action resulting in the child with the highest expected value
@@ -349,7 +367,7 @@ public:
   };
 
   // root-parallel search
-  A par_search(int iters, float exploration_bias, Apprentice<S,A> apprentice) {
+  A par_search(int iters, float exploration_bias) {
     assert (!this->mdp.is_terminal(this->state));
     auto num_threads = std::thread::hardware_concurrency();
     auto num_iters_per_thread = iters / num_threads;
@@ -357,11 +375,11 @@ public:
 
     auto threads = std::vector<std::thread>();
     std::mutex trees_m;
-    auto trees = std::vector<MCTSNode<S,A>*>();
+    auto trees = std::vector<ExItNode<S,A>*>();
     for (auto i = 0; i < num_threads; i++) {
       auto num_iters = i == num_threads - 1 ? num_iters_last_thread : num_iters_per_thread;
       threads.push_back(std::thread([=, &trees_m, &trees,this]() {
-        MCTSNode<S,A> *copy = new MCTSNode<S,A>(*this, this->parent);
+        ExItNode<S,A> *copy = new ExItNode<S,A>(*this, this->parent);
         copy->search(num_iters, exploration_bias, apprentice);
         trees_m.lock();
         trees.push_back(copy);
@@ -373,7 +391,7 @@ public:
       thread.join();
     }
 
-    MCTSNode<S,A> *tree = trees[0];
+    ExItNode<S,A> *tree = trees[0];
     for (auto i = 1; i < trees.size(); i++) {
       tree->merge(trees[i]);
     }
@@ -381,7 +399,7 @@ public:
     for (auto child : this->children) {
       delete child;
     }
-    *this = *new MCTSNode<S,A>(*tree, tree->parent);
+    *this = *new ExItNode<S,A>(*tree, tree->parent);
 
     for (auto tree : trees) {
       delete tree;
@@ -461,6 +479,7 @@ int uci_chess() {
     return -1;
   }
 
+  std::cout << "cuda is available: " << (torch::cuda::is_available() ? "yes" : "no") << std::endl;
   model.to(torch::kCUDA);
   auto evalf = [&model](thc::ChessRules state) { return model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor()[-1].item<double>(); };
   auto trainf = [&model](std::vector<thc::ChessRules> states, std::vector<std::string> actions, double reward) {
@@ -499,8 +518,8 @@ int uci_chess() {
     torch::Tensor fwd_tensor = model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor();
     return fwd_tensor.slice(0, 0, fwd_tensor.size(0) - 1);
   };
-  auto apprentice = new Apprentice<thc::ChessRules, std::string>(action_dist, evalf, trainf);
-  auto root = std::make_unique<MCTSNode<thc::ChessRules, std::string>>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt);
+  auto apprentice = Apprentice<thc::ChessRules, std::string>(action_dist, evalf, trainf);
+  auto root = std::make_unique<ExItNode<thc::ChessRules, std::string>>(mdp, apprentice, thc::ChessRules(), std::vector<ExItNode<thc::ChessRules, std::string>*>(), std::nullopt);
   
   auto cur_node = root.get();
   auto played = std::vector<std::string>();
@@ -540,7 +559,7 @@ int uci_chess() {
       board = thc::ChessRules(); 
       num_turns = 0;
       played = std::vector<std::string>();
-      root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+      root.reset(new ExItNode<thc::ChessRules, std::string>(mdp, apprentice, thc::ChessRules(), std::vector<ExItNode<thc::ChessRules, std::string>*>(), std::nullopt));
       cur_node = root.get();
     }
     // if cmd matches the regular expression position (pos) (.*)
@@ -558,7 +577,7 @@ int uci_chess() {
       } else {
         throw std::runtime_error("custom fen not supported"); // FIXME: add support for custom FEN
       }
-      root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, board, std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+      root.reset(new ExItNode<thc::ChessRules, std::string>(mdp, apprentice, board, std::vector<ExItNode<thc::ChessRules, std::string>*>(), std::nullopt));
       std::vector<std::string> played = std::vector<std::string>();
       for (auto mv : moves) {
         board.PlayMove(str_to_move(board, mv));
@@ -571,7 +590,7 @@ int uci_chess() {
       if (mdp.is_terminal(cur_node->state) && !mdp.actions(cur_node->state).empty()) {
         best_move_str = select_randomly(g, mdp.actions(cur_node->state)); // FIXME: this is a big bug,
       } else {
-        best_move_str = cur_node->par_search(150000, 0.5, *apprentice);
+        best_move_str = cur_node->par_search(150000, 0.5);
       }
       std::cout << "bestmove " << best_move_str << std::endl;
     }
@@ -586,7 +605,6 @@ int uci_chess() {
       //   std::filesystem::remove("apprentice.pt");
       // }
       model.save("apprentice.pt");
-      delete apprentice;
       return 0;
     }
     if (toks[0] == "selfplay") {
@@ -615,13 +633,13 @@ int uci_chess() {
 
             // train will handle all of the parity concerns internally.
             double reward = *mdp.reward(*(states.end()-1));
-            apprentice->train(states, actions, reward);
+            apprentice.train(states, actions, reward);
           }
 
           std::cout << "Starting new game" << std::endl;
           states = std::vector<thc::ChessRules>();
           board = thc::ChessRules();
-          root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, board, std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+          root.reset(new ExItNode<thc::ChessRules, std::string>(mdp, apprentice, board, std::vector<ExItNode<thc::ChessRules, std::string>*>(), std::nullopt));
           cur_node = root.get();
           played = std::vector<std::string>();
           display_position(board, "Initial position");
@@ -634,13 +652,13 @@ int uci_chess() {
         std::cout << "\tStalemates/draws: " << stalemates << std::endl;
         if (num_turns > 0 && num_turns % 5 == 0) {
           std::cout << "\tClearing\n";
-          root.reset(new MCTSNode<thc::ChessRules, std::string>(mdp, thc::ChessRules(), std::vector<MCTSNode<thc::ChessRules, std::string>*>(), std::nullopt));
+          root.reset(new ExItNode<thc::ChessRules, std::string>(mdp, apprentice, thc::ChessRules(), std::vector<ExItNode<thc::ChessRules, std::string>*>(), std::nullopt));
         }
 
         // play a move
         cur_node = root.get()->play(played);
         cur_node->state = board;
-        auto best_move_str = cur_node->par_search(800, 0.5, *apprentice);
+        auto best_move_str = cur_node->par_search(800, 0.5);
         actions.push_back(best_move_str);
         thc::Move best_move;
         best_move.TerseIn(&board, best_move_str.c_str());
