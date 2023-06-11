@@ -189,14 +189,15 @@ public:
     cur->expected = cur->tot / cur->count;
   }
 
-  inline double score(int cur_itersm1, double exploration_bias) {
+  inline double score(int cur_itersm1, double exploration_bias, bool bootstrap) {
       auto bonus_weight = 0.5;
-      auto exploration_term = sqrt((double)log((double)this->parent.value()->count + (double)1.0) / ((double)this->count + (double)1.0));
+      auto exploration_term = exploration_bias * sqrt((double)log((double)this->parent.value()->count + (double)1.0) / ((double)this->count + (double)1.0));
       auto exp = this->expected.value_or(0.0);
-      return exp + bonus_weight * this->apprentice.eval(this->state) + exploration_bias * exploration_term;
+      auto bonus_term = bootstrap ? 0.0 : bonus_weight * this->apprentice.eval(this->state);
+      return exp + bonus_term + exploration_term;
   }
 
-  inline std::optional<ExItNode<S,A>*> select(int cur_itersm1, double exploration_bias) {
+  inline std::optional<ExItNode<S,A>*> select(int cur_itersm1, double exploration_bias, bool bootstrap) {
     if (children.size() == 0) {
       return std::nullopt;
     }
@@ -209,7 +210,7 @@ public:
     // otherwise pick the child with the best UCT score
     auto best = argmax(children.begin(), children.end(),
                        [&](ExItNode<S,A>* child) {
-                         return child->score(cur_itersm1, exploration_bias);
+                         return child->score(cur_itersm1, exploration_bias, bootstrap);
                        });
     return *best;
   }
@@ -308,18 +309,17 @@ public:
   // search for iters iterations, starting from start
   // exploration_bias is the exploration term in the UCB1 formula
   // apprentice is what it sounds like. FIXME: better comment here.
-  A search(int iters, float exploration_bias) {
+  A search(int iters, float exploration_bias, bool bootstrap) {
     if (mdp.actions(this->state).size() == 0) {
       throw std::runtime_error("[ERROR]: search called on state we can't act in");
     }
     for (auto cur_itersm1 = 0; cur_itersm1 < iters; cur_itersm1++) {
-      std::cout << "iteration " << cur_itersm1 << std::endl;
       ExItNode<S,A>* cur = this;
 
       // SELECTION
       // std::cout << "selecting..." << std::endl;
       while (!cur->is_leaf()) {
-        cur = cur->select(cur_itersm1, exploration_bias).value(); // FIXME?: unsafe? what if select returns a nullopt?
+        cur = cur->select(cur_itersm1, exploration_bias, bootstrap).value(); // FIXME?: unsafe? what if select returns a nullopt?
       }
 
       // std::cout << "expanding..." << std::endl;
@@ -330,8 +330,11 @@ public:
       }
 
       // ROLLOUT
-      std::vector<ExItNode*> rollout_nodes = cur->dm_rollout();
-      cur = rollout_nodes.back();
+      std::vector<ExItNode*> rollout_nodes;
+      if (!mdp.is_terminal(cur->state)) {
+        rollout_nodes = bootstrap ? cur->basic_rollout() : cur->dm_rollout();
+        cur = rollout_nodes.back();
+      }
 
       // std::cout << "backpropagating..." << std::endl;
       // BACKPROPAGATION
@@ -361,12 +364,11 @@ public:
     }
 
     auto child = *std::find_if(this->children.begin(), this->children.end(), [&,this](auto child){ return child->state == this->mdp.tr(this->state, *ret); });
-    std::cout << "search complete!" << std::endl;
     return *ret;
   };
 
   // root-parallel search
-  A par_search(int iters, float exploration_bias) {
+  A par_search(int iters, float exploration_bias, bool bootstrap) {
     // assert (!this->mdp.is_terminal(this->state));
     auto num_threads = std::thread::hardware_concurrency();
     auto num_iters_per_thread = iters / num_threads;
@@ -379,7 +381,7 @@ public:
       auto num_iters = i == num_threads - 1 ? num_iters_last_thread : num_iters_per_thread;
       threads.push_back(std::thread([=, &trees_m, &trees,this]() {
         ExItNode<S,A> *copy = new ExItNode<S,A>(*this, this->parent);
-        copy->search(num_iters, exploration_bias);
+        copy->search(num_iters, exploration_bias, bootstrap);
         trees_m.lock();
         trees.push_back(copy);
         trees_m.unlock();
@@ -486,7 +488,7 @@ int uci_chess() {
     int parity = 1;
     for (int i = 0; i < states.size()-1; i++) {
       auto loss = torch::nn::MSELoss();
-      torch::Tensor output = model.forward({board_to_tensor(states[i]).to(torch::kCUDA).view({1,119,8,8})}).toTensor();
+      torch::Tensor output = model.forward({board_to_tensor(states[i]).to(torch::kCUDA).view({1,119,8,8})}).toTensor().to(torch::kCUDA);
 
       // convert the action to a tensor
       torch::Tensor action_tensor = torch::zeros({4096}).to(torch::kCUDA);
@@ -500,13 +502,13 @@ int uci_chess() {
       auto dst = std::make_pair(dst_str[0]-'a', dst_str[1]-'1');
       action_tensor[src.first*src.second * dst.first*dst.second] = 1;
 
-      std::vector<torch::Tensor> tgt = {action_tensor,torch::tensor({reward*parity})};
+      std::vector<torch::Tensor> tgt = {action_tensor,torch::tensor({reward*parity}).to(torch::kCUDA)};
       auto target = torch::cat(tgt, 0).to(torch::kCUDA);
-      auto l = loss(output, target);
+      auto l = loss(output, target).to(torch::kCUDA);
       l.backward();
       std::vector<torch::Tensor> parameters;
       for (auto parameter : model.parameters()) {
-        parameters.push_back(parameter);
+        parameters.push_back(parameter.to(torch::kCUDA));
       }
       torch::optim::SGD(parameters, 0.01).step();
       torch::optim::SGD(parameters, 0.01).zero_grad();
@@ -514,7 +516,7 @@ int uci_chess() {
     }
   };
   auto action_dist = [&model](thc::ChessRules state) {
-    torch::Tensor fwd_tensor = model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor();
+    torch::Tensor fwd_tensor = model.forward({board_to_tensor(state).to(torch::kCUDA).view({1,119,8,8})}).toTensor().to(torch::kCUDA);
     return fwd_tensor.slice(0, 0, fwd_tensor.size(0) - 1);
   };
   auto apprentice = Apprentice<thc::ChessRules, std::string>(action_dist, evalf, trainf);
@@ -589,7 +591,7 @@ int uci_chess() {
       if (mdp.is_terminal(cur_node->state) && !mdp.actions(cur_node->state).empty()) {
         best_move_str = select_randomly(g, mdp.actions(cur_node->state)); // FIXME: this is a big bug,
       } else {
-        best_move_str = cur_node->par_search(150000, 0.5);
+        best_move_str = cur_node->par_search(800, 0.5, false);
       }
       std::cout << "bestmove " << best_move_str << std::endl;
     }
@@ -657,7 +659,7 @@ int uci_chess() {
         // play a move
         cur_node = root.get()->play(played);
         cur_node->state = board;
-        auto best_move_str = cur_node->par_search(800, 0.5);
+        auto best_move_str = cur_node->par_search(800, 0.5, false);
         actions.push_back(best_move_str);
         thc::Move best_move;
         best_move.TerseIn(&board, best_move_str.c_str());
